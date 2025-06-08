@@ -1,0 +1,1316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>MicroStrategy Free Form SQL Report Creator</title>
+    <style>
+        .folder-browser {
+            margin: 10px 0;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .folder-item {
+            padding: 5px;
+            cursor: pointer;
+        }
+        .folder-item:hover {
+            background-color: #f0f0f0;
+        }
+        .folder-item.selected {
+            background-color: #e0e0ff;
+            font-weight: bold;
+        }
+        .folder-children {
+            margin-left: 20px;
+            display: none;
+        }
+        .breadcrumb {
+            margin: 5px 0;
+            font-size: 0.9em;
+            color: #666;
+        }
+        .breadcrumb span {
+            cursor: pointer;
+        }
+        .breadcrumb span:hover {
+            text-decoration: underline;
+        }
+        .upload-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 2px dashed #ccc;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .progress-container {
+            margin-top: 20px;
+            display: none;
+        }
+        .progress-bar {
+            width: 100%;
+            background-color: #f1f1f1;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        .progress {
+            height: 20px;
+            border-radius: 5px;
+            background-color: #4CAF50;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+            width: 0%;
+        }
+        .status-log {
+            height: 200px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            background-color: #f8f8f8;
+            margin-top: 10px;
+        }
+        .log-entry {
+            margin: 5px 0;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .log-entry.success {
+            color: green;
+        }
+        .log-entry.error {
+            color: red;
+        }
+        .log-entry.warning {
+            color: orange;
+        }
+        .prompt-info {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f8f8f8;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .prompt-item {
+            margin: 5px 0;
+            padding: 5px;
+            background-color: #fff;
+            border: 1px solid #eee;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+</head>
+<body style="font-family: Arial, sans-serif; margin: 20px;">
+    <h2>MicroStrategy Free Form SQL Report Creator</h2>
+    <div>
+        <label>Username: <input id="username" type="text" /></label><br><br>
+        <label>Password: <input id="password" type="password" /></label><br><br>
+        <button onclick="login()">Login</button>
+    </div>
+    <div id="project-section" style="display:none; margin-top:20px;">
+        <h3>Select Project</h3>
+        <select id="projectSelect"></select><br><br>
+        <button onclick="loadAttributesAndPrompts()">Load Attributes & Prompts</button>
+    </div>
+
+    
+    <div id="bulk-report-section" style="display:none; margin-top:30px;">
+        <h3>Bulk Report Creation</h3>
+        <div class="upload-section">
+            <h4>Upload Excel File</h4>
+            <p>Excel file should contain these columns: <strong>REPORT_NAME, QUERY_WITH_PROMPTS, DATA_SOURCE_NAME, DESTINATION_FOLDER_NAME, DESTINATION_FOLDER_ID</strong></p>
+            <input type="file" id="excelFile" accept=".xlsx, .xls" />
+            <button onclick="processExcelFile()">Process Excel File</button>
+            
+            <div class="progress-container" id="progressContainer">
+                <h4>Creation Progress</h4>
+                <div class="progress-bar">
+                    <div class="progress" id="progressBar">0%</div>
+                </div>
+                <div class="status-log" id="statusLog"></div>
+                <button id="cancelBtn" onclick="cancelBulkCreation()" style="margin-top:10px;">Cancel</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="result-section" style="display:none; margin-top:20px;">
+        <h3>Result:</h3>
+        <pre id="resultArea" style="background:#f4f4f4; padding:10px;"></pre>
+    </div>
+
+    <script>
+        const baseUrl = "https://172.17.99.72:8443/MicroStrategyLibrary/api";
+        const PUBLIC_OBJECTS_FOLDER_ID = "D3C7D461F69C4610AA6BAA5EF51F4125";
+        let authToken = '';
+        let projectId = '';
+        let attributesMap = {};
+        let promptsMap = {};
+        let dataSourcesMap = {};
+        let bulkCreationActive = false;
+        let cancelRequested = false;
+        let reportFolderId = '';
+        let detectedPrompts = [];
+
+        async function login() {
+            const username = document.getElementById("username").value;
+            const password = document.getElementById("password").value;
+            
+            try {
+                const response = await fetch(`${baseUrl}/auth/login`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json"
+                    },
+                    body: JSON.stringify({ username, password, loginMode: 1 }),
+                    credentials: "include"
+                });
+               
+                if (!response.ok) {
+                    alert("Login failed!");
+                    return;
+                }
+               
+                authToken = response.headers.get("X-MSTR-AuthToken");
+                const projectRes = await fetch(`${baseUrl}/projects`, {
+                    headers: {
+                        "X-MSTR-AuthToken": authToken,
+                        "Accept": "application/json"
+                    },
+                    credentials: "include"
+                });
+               
+                const projects = await projectRes.json();
+                const select = document.getElementById("projectSelect");
+                select.innerHTML = '';
+               
+                projects.forEach(p => {
+                    const option = document.createElement("option");
+                    option.value = p.id;
+                    option.textContent = p.name;
+                    select.appendChild(option);
+                });
+               
+                document.getElementById("project-section").style.display = "block";
+            } catch (error) {
+                alert(`Login error: ${error.message}`);
+            }
+        }
+
+        async function loadAttributesAndPrompts() {
+            projectId = document.getElementById("projectSelect").value;
+            if (!projectId) {
+                alert("Please select a project first!");
+                return;
+            }
+            
+            try {
+                // Load attributes
+                const attributesUrl = `${baseUrl}/folders/preDefined/26?offset=0&limit=-1`;
+                const attrResponse = await fetch(attributesUrl, {
+                    headers: {
+                        "X-MSTR-AuthToken": authToken,
+                        "X-MSTR-ProjectID": projectId,
+                        "Accept": "application/json"
+                    },
+                    credentials: "include"
+                });
+               
+                if (!attrResponse.ok) {
+                    throw new Error("Failed to load attributes!");
+                }
+               
+                const attrData = await attrResponse.json();
+                attributesMap = {};
+               
+                if (Array.isArray(attrData)) {
+                    attrData.forEach(attr => {
+                        if (attr.type === 12) {
+                            attributesMap[attr.name] = attr;
+                        }
+                    });
+                }
+        
+                // Load prompts
+                const promptsUrl = `${baseUrl}/folders/preDefined/6?offset=0&limit=-1`;
+                const promptsResponse = await fetch(promptsUrl, {
+                    headers: {
+                        "X-MSTR-AuthToken": authToken,
+                        "X-MSTR-ProjectID": projectId,
+                        "Accept": "application/json"
+                    },
+                    credentials: "include"
+                });
+        
+                if (!promptsResponse.ok) {
+                    throw new Error("Failed to load prompts!");
+                }
+        
+                const promptsData = await promptsResponse.json();
+                promptsMap = {};
+        
+                if (Array.isArray(promptsData)) {
+                    promptsData.forEach(prompt => {
+                        if (prompt.type === 10) {
+                            promptsMap[prompt.name] = prompt;
+                        }
+                    });
+                }
+                
+                // Load data sources - updated to handle the specific response structure
+                const dsResponse = await fetch(`${baseUrl}/datasources`, {
+                    headers: {
+                        "X-MSTR-AuthToken": authToken,
+                        "X-MSTR-ProjectID": projectId,
+                        "Accept": "application/json"
+                    },
+                    credentials: "include"
+                });
+                
+                if (!dsResponse.ok) {
+                    throw new Error("Failed to load data sources!");
+                }
+                
+                const dsResponseData = await dsResponse.json();
+                dataSourcesMap = {};
+                
+                // Handle the response structure with datasources array
+                if (dsResponseData && dsResponseData.datasources && Array.isArray(dsResponseData.datasources)) {
+                    dsResponseData.datasources.forEach(ds => {
+                        if (ds.name && ds.id) {
+                            dataSourcesMap[ds.name] = ds.id;
+                        }
+                    });
+                } else {
+                    console.warn("Unexpected data sources response structure:", dsResponseData);
+                    throw new Error("Data sources response has unexpected structure");
+                }
+               
+                alert(`Loaded:
+        - ${Object.keys(attributesMap).length} attributes
+        - ${Object.keys(promptsMap).length} prompts
+        - ${Object.keys(dataSourcesMap).length} data sources`);
+               
+                
+               
+                // Show both single and bulk report sections
+                document.getElementById("bulk-report-section").style.display = "block";
+                
+            } catch (error) {
+                alert(`Error during initialization: ${error.message}`);
+                console.error("Initialization error:", error);
+            }
+        }
+
+        async function searchFolderByName(folderName) {
+            try {
+                const url = `${baseUrl}/searches/results?name=${encodeURIComponent(folderName)}`;
+                const response = await fetch(url, {
+                    headers: {
+                        "X-MSTR-AuthToken": authToken,
+                        "X-MSTR-ProjectID": projectId,
+                        "Accept": "application/json"
+                    },
+                    credentials: "include"
+                });
+
+                if (!response.ok) {
+                    throw new Error(`API returned ${response.status}`);
+                }
+
+                const result = await response.json();
+                
+                // Find the first folder (type = 8) in the results
+                if (result.result && Array.isArray(result.result)) {
+                    const folder = result.result.find(item => item.type === 8);
+                    if (folder) {
+                        return folder.id;
+                    }
+                }
+                
+                return null;
+            } catch (error) {
+                console.error(`Error searching for folder "${folderName}":`, error);
+                return null;
+            }
+        }
+
+        async function resolveDestinationFolder(folderName) {
+            if (!folderName || folderName.trim() === "") {
+                return PUBLIC_OBJECTS_FOLDER_ID;
+            }
+
+            // First try to find the folder by exact name match
+            const folderId = await searchFolderByName(folderName);
+            
+            if (folderId) {
+                return folderId;
+            }
+
+            // If not found, return null
+            return null;
+        }
+
+        async function processSingleReport(report, statusLog) {
+            const { 'REPORT_NAME': reportName, 'QUERY_WITH_PROMPTS': sqlQuery, 
+                   'DATA_SOURCE_NAME': dataSourceName, 'DESTINATION_FOLDER_NAME': destinationFolderName, 'DESTINATION_FOLDER_ID': DestinationFolderID } = report;
+            
+            addLogEntry(`Processing report "${reportName}"...`);
+            
+            try {
+                // Validate data source
+                
+                const datasourceId = dataSourcesMap[dataSourceName];
+                if (!datasourceId) {
+                    throw new Error(`Data source "${dataSourceName}" not found`);
+                }
+        
+                // Resolve destination folder
+                const folderId = await resolveDestinationFolder(destinationFolderName);
+                if (!folderId) {
+                    throw new Error(`Could not find destination folder "${destinationFolderName}"`);
+                }
+        
+                // Create report folder
+                reportFolderId = await createFolder(reportName, DestinationFolderID);
+                addLogEntry(`Created folder "${reportName}" in "${destinationFolderName}"`, "success");
+        
+                // Create the report
+                const result = await createReport({
+                    reportName,
+                    sqlQuery,
+                    datasourceId,
+                    dataSourceName,
+                    destinationFolderId: reportFolderId,
+                    destinationPath: destinationFolderName + '/' + reportName
+                });
+                
+                if (result.success) {
+                    addLogEntry(`Successfully created report "${reportName}"`, "success");
+                    return result;
+                } else {
+                    throw new Error(result.error || "Unknown error during report creation");
+                }
+            } catch (error) {
+                addLogEntry(`Failed to create report "${reportName}": ${error.message}`, "error");
+                throw error;
+            }
+        }
+        
+        async function createFolder(folderName, parentFolderId) {
+            const url = `${baseUrl}/folders`;
+            
+            const payload = {
+                name: folderName,
+                parent: parentFolderId
+            };
+            
+            const response = await fetch(url, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-MSTR-AuthToken": authToken,
+                    "X-MSTR-ProjectID": projectId,
+                    "Accept": "application/json"
+                },
+                body: JSON.stringify(payload)
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Failed to create folder: HTTP ${response.status}`);
+            }
+            
+            const result = await response.json();
+            return result.id;
+        }
+                
+        
+        async function createReport(params) {
+            const { reportName, sqlQuery, datasourceId, dataSourceName, destinationFolderId, destinationPath } = params;
+            
+            try {
+                // First detect and validate prompts
+
+                const { prompts: promptMatches, promptNames } = detectPromptsInSQL(sqlQuery);
+
+                detectedPrompts = [];
+                
+                for (const promptName of promptNames) {
+                    const promptInfo = promptsMap[promptName];
+                    if (promptInfo) {
+                        const promptDetails = await getPromptDetails(promptInfo.id);
+                        if (promptDetails) {
+                            detectedPrompts.push({
+                                name: promptName,
+                                id: promptDetails.information.objectId,
+                                subType: promptDetails.information.subType,
+                                found: true
+                            });
+                        }
+                    }
+                }
+                console.log(detectedPrompts)
+                console.log(promptNames)
+
+        
+                // Parse columns with enhanced function that handles aliases
+                const columns = parseSQLColumns(sqlQuery);
+                if (columns.length === 0) {
+                    throw new Error("No columns found in SQL!");
+                }
+                
+                // Create physical table columns using physical names
+                const physicalTableColumnsDef = columns.map(col => ({
+                    name: col.physicalName,
+                    dataType: { type: "n_var_char", precision: 255, scale: 0 }
+                }));
+                
+                // Create attributes using attribute names (aliases if available)
+                const attributesDef = [];
+                
+                for (const col of columns) {
+                    try {
+                        // Find attribute by either physical name or alias
+                        const attr = Object.values(attributesMap).find(a =>
+                            a.name.toLowerCase() === col.attributeName.toLowerCase() ||
+                            a.name.toLowerCase().replace(/_/g, ' ') === col.attributeName.toLowerCase().replace(/_/g, ' ')
+                        );
+                        
+                        if (!attr) {
+                            console.warn(`No attribute found for column "${col.attributeName}"`);
+                            continue;
+                        }
+                        
+                        const attrDetails = await getAttributeDetails(attr.id);
+                        if (!attrDetails) continue;
+                        
+                        const formId = attrDetails.keyForm?.id ||
+                                      (attrDetails.forms && attrDetails.forms[0]?.id);
+                        
+                        if (!formId) {
+                            console.warn(`No form found for attribute "${col.attributeName}"`);
+                            continue;
+                        }
+                        
+                        const form = attrDetails.forms?.find(f => f.id === formId) || {};
+                        
+                        attributesDef.push({
+                            id: attr.id,
+                            name: attr.name,
+                            forms: [{
+                                id: formId,
+                                category: form.category || "None",
+                                type: form.type || "system",
+                                displayFormat: form.displayFormat || "text",
+                                expression: {
+                                    tree: {
+                                        type: "column_reference",
+                                        name: col.physicalName  // Reference the physical column
+                                    }
+                                }
+                            }]
+                        });
+                    } catch (error) {
+                        console.error(`Error processing column ${col.attributeName}:`, error);
+                    }
+                }
+        
+                // Build the payload based on whether we have prompts or not
+                let payload;
+                let hasPrompts = detectedPrompts.length > 0;
+                
+                console.log(hasPrompts)
+                
+                if (hasPrompts) {
+                    // Parse SQL with validated prompts
+                    const sqlexpression = parseSQLWithPrompts(sqlQuery, detectedPrompts);
+                    
+                    payload = {
+                        information: {
+                            name: reportName,
+                            destinationFolderId: destinationFolderId
+                        },
+                        sourceType: "custom_sql_free_form",
+                        dataSource: {
+                            dataTemplate: {
+                                units: attributesDef.map(attr => ({
+                                    id: attr.id,
+                                    name: attr.name,
+                                    type: "attribute",
+                                    forms: attr.forms.map(form => ({
+                                        id: form.id,
+                                        name: form.name || attr.name
+                                    })),
+                                    nonAggregatable: false
+                                }))
+                            },
+                            table: {
+                                physicalTable: {
+                                    columns: physicalTableColumnsDef,
+                                    sqlExpression: sqlexpression
+                                },
+                                attributes: attributesDef,
+                                metrics: [],
+                                dataSource: {
+                                    objectId: datasourceId,
+                                    subType: "db_role_import",
+                                    name: dataSourceName
+                                }
+                            }
+                        },
+                        grid: {
+                            viewTemplate: {
+                                rows: {
+                                    units: attributesDef.map(attr => ({
+                                        id: attr.id,
+                                        name: attr.name,
+                                        type: "attribute",
+                                        forms: attr.forms.map(form => ({
+                                            id: form.id,
+                                            name: form.name || attr.name
+                                        }))
+                                    })),
+                                    sorts: []
+                                },
+                                columns: {
+                                    units: [],
+                                    sorts: []
+                                },
+                                pageBy: {
+                                    units: [],
+                                    sorts: []
+                                }
+                            },
+                            viewFilter: {}
+                        },
+                        timezone: {}
+                    };
+                } else {
+                    // Build payload for non-prompted queries
+                    payload = {
+                        information: {
+                            name: reportName,
+                            destinationFolderId: destinationFolderId
+                        },
+                        sourceType: "custom_sql_free_form",
+                        dataSource: {
+                            table: {
+                                physicalTable: {
+                                    columns: physicalTableColumnsDef,
+                                    sqlExpression: {
+                                        tree: {
+                                            function: "concat_no_blank",
+                                            children: [{
+                                                type: "constant",
+                                                variant: { 
+                                                    type: "string", 
+                                                    value: sqlQuery.trim() 
+                                                }
+                                            }],
+                                            type: "operator"
+                                        }
+                                    }
+                                },
+                                attributes: attributesDef,
+                                metrics: [],
+                                dataSource: {
+                                    objectId: datasourceId,
+                                    subType: "db_role_import",
+                                    name: dataSourceName
+                                }
+                            }
+                        },
+                        grid: {
+                            viewTemplate: {
+                                rows: {
+                                    units: attributesDef.map(attr => ({
+                                        id: attr.id,
+                                        name: attr.name,
+                                        type: "attribute",
+                                        forms: attr.forms.map(form => ({
+                                            id: form.id,
+                                            name: form.name || attr.name
+                                        }))
+                                    })),
+                                    sorts: []
+                                },
+                                columns: {
+                                    units: [],
+                                    sorts: []
+                                },
+                                pageBy: {
+                                    units: [],
+                                    sorts: []
+                                }
+                            },
+                            viewFilter: {}
+                        },
+                        timezone: {}
+                    };
+                }
+                
+                // Create the report
+                const createResponse = await fetch(`${baseUrl}/model/reports`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-MSTR-AuthToken": authToken,
+                        "X-MSTR-ProjectID": projectId,
+                        "Accept": "application/json"
+                    },
+                    body: JSON.stringify(payload)
+                });
+                
+                const result = await createResponse.json();
+                
+                if (!createResponse.ok) {
+                    throw new Error(`API Error: ${JSON.stringify(result)}`);
+                }
+                
+                // Always call the save API, regardless of prompts
+                const instanceId = createResponse.headers.get("X-MSTR-MS-Instance");
+                const reportId = result.information.objectId;
+                
+                const saveResponse = await fetch(`${baseUrl}/model/reports/${reportId}/instances/save`, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-MSTR-AuthToken": authToken,
+                        "X-MSTR-MS-Instance": instanceId,
+                        "X-MSTR-ProjectID": projectId,
+                        "Accept": "application/json"
+                    },
+                    body: JSON.stringify({
+                        promptOptions: {
+                            saveAsWithAnswers: hasPrompts,
+                            saveAsFilterWithPrompts: hasPrompts,
+                            saveAsTemplateWithPrompts: hasPrompts
+                        }
+                    }),
+                    credentials: "include"
+                });
+                
+                if (!saveResponse.ok) {
+                    throw new Error("Failed to save report instance");
+                }
+                
+                return {
+                    success: true,
+                    reportId: result.information.objectId,
+                    reportName,
+                    destinationPath,
+                    hasPrompts: hasPrompts
+                };
+                
+            } catch (error) {
+                console.error(`Error creating report "${reportName}":`, error);
+                return {
+                    success: false,
+                    reportName,
+                    error: error.message,
+                    destinationPath
+                };
+            }
+        }
+        async function processExcelFile() {
+            const fileInput = document.getElementById("excelFile");
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                alert("Please select an Excel file first!");
+                return;
+            }
+            
+            try {
+                const data = await readExcelFile(file);
+                const jsonData = parseExcelData(data);
+                
+                if (jsonData.length === 0) {
+                    alert("Excel file is empty or invalid format!");
+                    return;
+                }
+                
+                await startBulkCreation(jsonData);
+            } catch (error) {
+                alert(`Error processing Excel file: ${error.message}`);
+                console.error("Excel processing error:", error);
+            }
+        }
+        
+        function readExcelFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(new Uint8Array(e.target.result));
+                reader.onerror = (error) => reject(error);
+                reader.readAsArrayBuffer(file);
+            });
+        }
+        
+        function parseExcelData(data) {
+            const workbook = XLSX.read(data, { type: 'array' });
+            const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+            const jsonDataRaw = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+        
+            // Validate required columns
+            const requiredColumns = ['REPORT_NAME', 'QUERY_WITH_PROMPTS', 'DATA_SOURCE_NAME', 'DESTINATION_FOLDER_NAME', 'DESTINATION_FOLDER_ID'];
+        
+            // Filter out rows where all required fields are empty
+            const jsonData = jsonDataRaw.filter(row =>
+                requiredColumns.some(col => (row[col] || "").toString().trim() !== "")
+            );
+        
+            if (jsonData.length > 0) {
+                const missingColumns = requiredColumns.filter(col => !(col in jsonData[0]));
+                if (missingColumns.length > 0) {
+                    throw new Error(`Missing required columns: ${missingColumns.join(', ')}`);
+                }
+            }
+
+            return jsonData;
+        }
+
+        
+        async function startBulkCreation(reportsData) {
+            const progressContainer = document.getElementById("progressContainer");
+            const progressBar = document.getElementById("progressBar");
+            const statusLog = document.getElementById("statusLog");
+            
+            // Reset UI and flags
+            progressContainer.style.display = "block";
+            progressBar.style.width = "0%";
+            progressBar.textContent = "0%";
+            statusLog.innerHTML = "";
+            cancelRequested = false;
+            bulkCreationActive = true;
+            
+            let successCount = 0;
+            let errorCount = 0;
+            const totalReports = reportsData.length;
+            
+            try {
+                for (let i = 0; i < totalReports; i++) {
+                    if (cancelRequested) {
+                        addLogEntry("Bulk creation canceled by user", "warning");
+                        break;
+                    }
+                    
+                    const report = reportsData[i];
+                    const progress = Math.floor(((i + 1) / totalReports) * 100);
+                    updateProgress(progressBar, progress);
+                    
+                    await processSingleReport(report, statusLog)
+                        .then(result => successCount++)
+                        .catch(error => errorCount++);
+                }
+                
+                const completionMessage = `Bulk creation completed: ${successCount} succeeded, ${errorCount} failed`;
+                addLogEntry(completionMessage, 
+                           errorCount === 0 ? "success" : (successCount === 0 ? "error" : "warning"));
+            } catch (error) {
+                addLogEntry(`Fatal error during bulk creation: ${error.message}`, "error");
+            } finally {
+                bulkCreationActive = false;
+                updateProgress(progressBar, 100);
+            }
+        }
+
+        function addLogEntry(message, type = "") {
+            const statusLog = document.getElementById("statusLog");
+            const entry = document.createElement("div");
+            entry.className = `log-entry ${type}`;
+            entry.textContent = message;
+            statusLog.appendChild(entry);
+            statusLog.scrollTop = statusLog.scrollHeight;
+        }
+        
+        function updateProgress(progressBar, progress) {
+            progressBar.style.width = `${progress}%`;
+            progressBar.textContent = `${progress}%`;
+        }
+        
+        function cancelBulkCreation() {
+            if (bulkCreationActive && !cancelRequested) {
+                cancelRequested = true;
+                addLogEntry("Cancellation requested...", "warning");
+            }
+        }
+
+
+
+        
+        async function createSingleReport() {
+            const sqlQuery = document.getElementById("sqlQuery").value;
+            const datasourceId = document.getElementById("datasourceId").value;
+            const reportName = document.getElementById("reportName").value;
+            const destinationFolderId = document.getElementById("destinationFolderId").value;
+            
+            if (!reportName || !sqlQuery || !datasourceId || !destinationFolderId) {
+                alert("Please fill all required fields!");
+                return;
+            }
+            
+            try {
+                // First create the folder
+                const folderName = reportName;
+                const reportFolderId = await createFolder(folderName, destinationFolderId);
+                document.getElementById('selectedFolderInfo').textContent = 
+                    `Created and selected folder: ${folderName}`;
+                
+                // Then create the report in that folder
+                await createReport({
+                    reportName,
+                    sqlQuery,
+                    datasourceId,
+                    dataSourceName,
+                    destinationFolderId: reportFolderId,
+                    destinationPath: currentFolderPath.map(f => f.name).join('/') + '/' + folderName
+                });
+            } catch (error) {
+                alert(`Error creating report: ${error.message}`);
+            }
+        }
+            
+        function detectPromptsInSQL(sql) {
+            const promptMatches = [];
+            const promptNames = [];
+            let currentIndex = 0;
+        
+            while (currentIndex < sql.length) {
+                if (sql[currentIndex] === '#') {
+                    const blockStart = currentIndex;
+                    currentIndex++;
+                    let blockContent = '';
+        
+                    while (currentIndex < sql.length && sql[currentIndex] !== '#') {
+                        blockContent += sql[currentIndex];
+                        currentIndex++;
+                    }
+        
+                    if (currentIndex < sql.length && sql[currentIndex] === '#') {
+                        const blockEnd = currentIndex + 1; // Include closing #
+                        const promptsInBlock = [];
+                        let promptStart = blockContent.indexOf('[');
+        
+                        while (promptStart !== -1) {
+                            const promptEnd = blockContent.indexOf(']', promptStart);
+                            if (promptEnd === -1) break;
+        
+                            const promptName = blockContent.substring(promptStart + 1, promptEnd);
+                            promptsInBlock.push(promptName);
+                            promptNames.push(promptName);
+                            promptStart = blockContent.indexOf('[', promptEnd + 1);
+                        }
+        
+                        if (promptsInBlock.length > 0) {
+                            promptMatches.push({
+                                type: 'optional',
+                                start: blockStart,
+                                end: blockEnd,
+                                content: blockContent,
+                                prompts: promptsInBlock
+                            });
+                        }
+        
+                        currentIndex++;
+                    }
+                    continue;
+                }
+        
+                if (sql[currentIndex] === '[') {
+                    const promptStart = currentIndex;
+                    currentIndex++;
+                    let promptName = '';
+        
+                    while (currentIndex < sql.length && sql[currentIndex] !== ']') {
+                        promptName += sql[currentIndex];
+                        currentIndex++;
+                    }
+        
+                    if (currentIndex < sql.length && sql[currentIndex] === ']') {
+                        promptMatches.push({
+                            type: 'required',
+                            name: promptName,
+                            start: promptStart,
+                            end: currentIndex + 1 // Include closing ]
+                        });
+        
+                        promptNames.push(promptName);
+                        currentIndex++;
+                    }
+                    continue;
+                }
+        
+                currentIndex++;
+            }
+        
+            return {
+                prompts: promptMatches,
+                promptNames
+            };
+        }
+        
+        
+
+        
+        async function processPromptDisplay(promptName, promptListDiv, promptType) {
+            const promptInfo = promptsMap[promptName];
+            
+            if (!promptInfo) {
+                promptListDiv.innerHTML += `
+                    <div class="prompt-item" style="color: red;">
+                        <strong>${promptName}</strong> (${promptType}): Prompt not found in the system!
+                    </div>
+                `;
+                detectedPrompts.push({
+                    name: promptName,
+                    type: promptType,
+                    found: false
+                });
+                return;
+            }
+        
+            try {
+                const promptDetails = await getPromptDetails(promptInfo.id);
+                if (!promptDetails) {
+                    promptListDiv.innerHTML += `
+                        <div class="prompt-item" style="color: orange;">
+                            <strong>${promptName}</strong> (${promptType}): Could not fetch prompt details
+                        </div>
+                    `;
+                    detectedPrompts.push({
+                        name: promptName,
+                        type: promptType,
+                        found: false
+                    });
+                    return;
+                }
+        
+                promptListDiv.innerHTML += `
+                    <div class="prompt-item">
+                        <strong>${promptName}</strong> (${promptType})<br>
+                        Type: ${promptDetails.information.subType}<br>
+                        ID: ${promptDetails.information.objectId}
+                    </div>
+                `;
+        
+                detectedPrompts.push({
+                    name: promptName,
+                    type: promptType,
+                    id: promptDetails.information.objectId,
+                    subType: promptDetails.information.subType,
+                    found: true
+                });
+            } catch (error) {
+                console.error(`Error fetching prompt details for ${promptName}:`, error);
+                promptListDiv.innerHTML += `
+                    <div class="prompt-item" style="color: orange;">
+                        <strong>${promptName}</strong> (${promptType}): Error fetching details
+                    </div>
+                `;
+                detectedPrompts.push({
+                    name: promptName,
+                    type: promptType,
+                    found: false
+                });
+            }
+        }
+        async function getPromptDetails(promptId) {
+            const url = `${baseUrl}/model/prompts/${promptId}`;
+            const response = await fetch(url, {
+                headers: {
+                    "X-MSTR-AuthToken": authToken,
+                    "X-MSTR-ProjectID": projectId,
+                    "Accept": "application/json"
+                },
+                credentials: "include"
+            });
+        
+            if (!response.ok) {
+                console.error(`Failed to fetch prompt details for ID: ${promptId}`);
+                return null;
+            }
+        
+            return await response.json();
+        }
+        
+        
+        function parseSQLWithPrompts(sql, detectedPrompts = []) {
+            const children = [];
+            
+            // First detect all prompts and optional blocks
+            const { prompts: allElements } = detectPromptsInSQL(sql);
+            
+            // Sort elements by their start position to ensure correct order
+            allElements.sort((a, b) => a.start - b.start);
+            console.log(allElements)
+            const getPromptByName = (name) => detectedPrompts.find(p => p.name === name);
+        
+            // 1. Add the initial constant part (before first element)
+            const firstElement = allElements[0];
+            const initialSQL = firstElement ? sql.substring(0, firstElement.start) : sql;
+            if (initialSQL.trim()) {
+                children.push({
+                    type: "constant",
+                    variant: { type: "string", value: initialSQL }
+                });
+            }
+        
+            // Process each element in order
+            for (let i = 0; i < allElements.length; i++) {
+                const element = allElements[i];
+                const nextElement = i < allElements.length - 1 ? allElements[i + 1] : null;
+                
+                // Add any SQL between current and previous element
+                if (i > 0) {
+                    const prevElement = allElements[i - 1];
+                    const betweenSQL = sql.substring(prevElement.end, element.start);
+                    if (betweenSQL.trim()) {
+                        children.push({
+                            type: "constant",
+                            variant: { 
+                                type: "string", 
+                                value: betweenSQL
+                            }
+                        });
+                    }
+                }
+        
+                // Handle the current element
+                if (element.type === 'optional') {
+                    // Process each prompt in the optional block
+                    element.prompts.forEach(promptName => {
+                        const prompt = getPromptByName(promptName);
+                        
+                        if (prompt) {
+                            const promptContent = element.content.replace(
+                                `[${promptName}]`, 
+                                '#0'
+                            );
+                            // Determine prompt type based on subType
+                            const promptType = prompt.subType === "prompt_elements" ? "elements_object" : "constant";
+                            
+                            children.push({
+                                function: "apply_optional",
+                                type: "operator",
+                                children: [
+                                    {
+                                        type: "constant",
+                                        variant: {
+                                            type: "string",
+                                            value: "\n \t" + promptContent
+                                        }
+                                    },
+                                    {
+                                        type: promptType,
+                                        prompt: {
+                                            objectId: prompt.id,
+                                            subType: prompt.subType,
+                                            name: prompt.name
+                                        }
+                                    }
+                                ]
+                            });
+                        }
+                    });
+                } else {
+                    // Handle regular prompt
+                    const prompt = getPromptByName(element.name);
+                    if (prompt) {
+                        // Determine prompt type based on subType
+                        const promptType = prompt.subType === "prompt_elements" ? "elements_object" : "constant";
+                        children.push({
+                            function: "apply_optional",
+                            type: "operator",
+                            children: [
+                                {
+                                    type: "constant",
+                                    variant: { type: "string", value: "#0" }
+                                },
+                                {
+                                    type: promptType,
+                                    prompt: {
+                                        objectId: prompt.id,
+                                        subType: prompt.subType,
+                                        name: prompt.name
+                                    }
+                                }
+                            ]
+                        });
+                    }
+                }
+            }
+        
+            // Add remaining SQL after last element
+            const lastElement = allElements[allElements.length - 1];
+            let remainingSQL = lastElement ? sql.substring(lastElement.end) : sql;
+            
+            if (remainingSQL.trim()) {
+                children.push({
+                    type: "constant",
+                    variant: { type: "string", value: remainingSQL }
+                });
+            }
+        
+            return {
+                    tree: {
+                        function: "concat_no_blank",
+                        type: "operator",
+                        children
+                    }
+            };
+        }      
+
+        function parseSQLColumns(sql) {
+            // First remove comments and normalize whitespace
+            const normalizedSql = sql
+                .replace(/--.*$/gm, '')  // Remove single-line comments
+                .replace(/\/\*[\s\S]*?\*\//g, '')  // Remove multi-line comments
+                .replace(/\s+/g, ' ')
+                .trim();
+        
+            // Extract the SELECT clause (up to FROM)
+            const selectMatch = normalizedSql.match(/^SELECT\s+(.*?)\s+FROM\s+/i);
+            if (!selectMatch || selectMatch.length < 2) {
+                console.warn("No SELECT clause found in SQL");
+                return [];
+            }
+        
+            const columnSection = selectMatch[1];
+            
+            // Split columns while handling complex expressions
+            const columns = [];
+            let current = '';
+            let parenDepth = 0;
+            let inString = false;
+            let stringChar = '';
+        
+            for (let i = 0; i < columnSection.length; i++) {
+                const char = columnSection[i];
+                
+                // Handle string literals
+                if ((char === "'" || char === '"') && !inString) {
+                    inString = true;
+                    stringChar = char;
+                } else if (char === stringChar && inString) {
+                    inString = false;
+                    stringChar = '';
+                }
+                
+                // Track parentheses depth
+                if (!inString) {
+                    if (char === '(') parenDepth++;
+                    if (char === ')') parenDepth--;
+                }
+                
+                // Split at commas only when not in strings or parentheses
+                if (char === ',' && parenDepth === 0 && !inString) {
+                    columns.push(current.trim());
+                    current = '';
+                } else {
+                    current += char;
+                }
+            }
+            
+            // Add the last column
+            if (current.trim()) {
+                columns.push(current.trim());
+            }
+        
+            // Process each column definition
+            return columns.map(col => {
+                // CASE 1: First check for AS with double quotes (highest priority)
+                const quotedAliasMatch = col.match(/(?:AS\s+)?(["'])(.*?)\1\s*$/i);
+                if (quotedAliasMatch) {
+                    const alias = quotedAliasMatch[2];
+                    const expression = col.substring(0, col.toLowerCase().lastIndexOf(' as ')).trim() || 
+                                     col.substring(0, col.toLowerCase().lastIndexOf(quotedAliasMatch[0])).trim();
+                    const baseName = expression.includes('.') ? 
+                        expression.split('.').pop() : expression;
+                    
+                    return {
+                        expression: expression,
+                        physicalName: alias, // Use alias as physical name to avoid duplicates
+                        attributeName: alias,
+                        isComplex: /\(.*\)/.test(expression),
+                        originalExpression: col
+                    };
+                }
+        
+                // CASE 2: Check for AS without quotes
+                const unquotedAliasMatch = col.match(/\s+AS\s+([^,\s]+)\s*$/i);
+                if (unquotedAliasMatch) {
+                    const alias = unquotedAliasMatch[1];
+                    const expression = col.substring(0, col.toLowerCase().lastIndexOf(' as ')).trim();
+                    const baseName = expression.includes('.') ? 
+                        expression.split('.').pop() : expression;
+                    
+                    return {
+                        expression: expression,
+                        physicalName: alias, // Use alias as physical name
+                        attributeName: alias,
+                        isComplex: /\(.*\)/.test(expression),
+                        originalExpression: col
+                    };
+                }
+        
+                // CASE 3: Handle table aliased columns (A.SALES)
+                const tableAliasMatch = col.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\.([a-zA-Z_][a-zA-Z0-9_]*)/);
+                if (tableAliasMatch) {
+                    return {
+                        expression: col,
+                        physicalName: tableAliasMatch[2], // Use column name after dot
+                        attributeName: tableAliasMatch[2],
+                        isComplex: false,
+                        originalExpression: col
+                    };
+                }
+        
+                // CASE 4: Simple column names
+                return {
+                    expression: col,
+                    physicalName: col.replace(/^["'`]|["'`]$/g, ''),
+                    attributeName: col.replace(/^["'`]|["'`]$/g, ''),
+                    isComplex: false,
+                    originalExpression: col
+                };
+            }).filter(col => col.physicalName);
+        }
+
+        async function getAttributeDetails(attributeId, retries = 3) {
+            const url = `${baseUrl}/model/attributes/${attributeId}`;
+            console.log(`Fetching attribute details for ID: ${attributeId}`);
+           
+            try {
+                const response = await fetch(url, {
+                    headers: {
+                        "X-MSTR-AuthToken": authToken,
+                        "X-MSTR-ProjectID": projectId,
+                        "Accept": "application/json"
+                    },
+                    credentials: "include"
+                });
+               
+                if (!response.ok) {
+                    if (response.status === 429 && retries > 0) {
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        return getAttributeDetails(attributeId, retries - 1);
+                    }
+                    console.error(`Failed to fetch attribute details for ID: ${attributeId}`);
+                    return null;
+                }
+               
+                return await response.json();
+            } catch (error) {
+                if (retries > 0) {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    return getAttributeDetails(attributeId, retries - 1);
+                }
+                console.error(`Error fetching attribute details for ID: ${attributeId}:`, error);
+                return null;
+            }
+        }
+      </script>      
+</body>
+</html>
